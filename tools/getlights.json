@@ -1,0 +1,31 @@
+{
+	"status_led":2,
+	"separate_accessories":true,
+	"lights":[
+		{
+		 "light_gpio":16,
+		 "led_gpio":13,
+		 "button_gpio":12,
+		 "is_dimmer":true,
+		 "is_remote":false,
+		 "is_hidden":true,
+		 "remote_cmd":null
+		},
+		{
+		 "light_gpio":5,
+		 "led_gpio":4,
+		 "button_gpio":14,
+		 "is_dimmer":false,
+		 "is_remote":true,
+		 "is_hidden":false,
+		 "remote_cmd":{"host":"http://device_ip_address:5556/characteristic","method":"PUT","payload":{"characteristics":[{"aid":1,"iid":9,"value":"ON"},{"aid":1,"iid":9,"value":"BRIGHTNESS"}]}}
+
+		}
+	],
+	"invert": {
+		 "status_gpio":true,
+		 "light_gpio":true,
+		 "led_gpio":true,
+		 "button_gpio":true
+		}
+}
