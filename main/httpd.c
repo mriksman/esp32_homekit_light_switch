@@ -24,10 +24,8 @@ static const char *TAG = "myhttpd";
 
 static httpd_handle_t server = NULL;
 
-#ifdef CONFIG_IDF_TARGET_ESP32
-    esp_event_handler_instance_t wifi_event_handler_instance;
-    esp_event_handler_instance_t ip_event_handler_instance;
-#endif
+esp_event_handler_instance_t wifi_event_handler_instance;
+esp_event_handler_instance_t ip_event_handler_instance;
 
 char log_buf[LOG_BUF_MAX_LINE_SIZE];
 static TaskHandle_t t_sse_task_handle;
@@ -38,33 +36,13 @@ static QueueHandle_t q_sse_message_queue;
 // needs to make sure it has an updated copy
 volatile int sse_sockets[MAX_SSE_CLIENTS];
 
-#ifdef CONFIG_IDF_TARGET_ESP32
-    int sse_logging_vprintf(const char *format, va_list arg) {
-        vsprintf(log_buf, format, arg);
-        xQueueSendToBack(q_sse_message_queue, log_buf, 0);
+int sse_logging_vprintf(const char *format, va_list arg) {
+    vsprintf(log_buf, format, arg);
+    xQueueSendToBack(q_sse_message_queue, log_buf, 0);
 
-        // still send to console
-        return vprintf(format, arg);
-    }
-#elif CONFIG_IDF_TARGET_ESP8266
-    int sse_logging_putchar(int chr) {
-        if(chr == '\n'){
-            // send without the '\n'
-            xQueueSendToBack(q_sse_message_queue, log_buf, 0);
-            // 'clear' string
-            log_buf[0] = '\0';    
-        } else {
-            size_t len = strlen(log_buf);
-            if (len < LOG_BUF_MAX_LINE_SIZE - 1) {
-                log_buf[len] = chr;
-                log_buf[len+1] = '\0';
-            }
-        }
-        // still send to console
-        return putchar(chr);
-    }
-#endif
-
+    // still send to console
+    return vprintf(format, arg);
+}
 
 void send_sse_message (char* message, char* event) {
     const char *sse_data = "data: ";
@@ -118,16 +96,10 @@ static void status_json_sse_handler()
     wifi_config_t wifi_cfg;
     esp_wifi_get_config(ESP_IF_WIFI_STA, &wifi_cfg);
 
-    #ifdef CONFIG_IDF_TARGET_ESP32
-        esp_netif_ip_info_t ip_info;
-        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
-        esp_netif_get_ip_info(netif, &ip_info);
-        bool if_status = esp_netif_is_netif_up(netif);
-    #elif CONFIG_IDF_TARGET_ESP8266
-        tcpip_adapter_ip_info_t ip_info;
-        ESP_ERROR_CHECK(tcpip_adapter_get_ip_info(TCPIP_ADAPTER_IF_STA, &ip_info));
-        bool if_status = tcpip_adapter_is_netif_up(TCPIP_ADAPTER_IF_STA);
-    #endif
+    esp_netif_ip_info_t ip_info;
+    esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_get_ip_info(netif, &ip_info);
+    bool if_status = esp_netif_is_netif_up(netif);
 
     cJSON_AddItemToObject(root, "ssid", cJSON_CreateString((const char *)wifi_cfg.sta.ssid));
     snprintf(ip_buf, 17, IPSTR, IP2STR(&ip_info.ip));
@@ -151,8 +123,7 @@ static void status_json_sse_handler()
 
 }
 
-static void wifi_event_handler(void* arg, esp_event_base_t event_base,
-                                    int32_t event_id, void* event_data) {
+static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data) {
     status_json_sse_handler();
 }
 
@@ -173,11 +144,7 @@ void free_sse_ctx_func(void *ctx)
 esp_err_t server_side_event_registration_handler(httpd_req_t *req)
 {
     // disable sending to sse_socket until a proper HTTP 200 OK response has been sent back to client
-    #ifdef CONFIG_IDF_TARGET_ESP32
-        esp_log_set_vprintf(vprintf);
-    #elif CONFIG_IDF_TARGET_ESP8266
-        esp_log_set_putchar(putchar);
-    #endif
+    esp_log_set_vprintf(vprintf);
     
     int len;
     char buffer[150];
@@ -225,11 +192,7 @@ esp_err_t server_side_event_registration_handler(httpd_req_t *req)
     send_sse_message(buffer, "firmware");
 
     // enable sse logging again
-    #ifdef CONFIG_IDF_TARGET_ESP32
-        esp_log_set_vprintf(&sse_logging_vprintf);
-    #elif CONFIG_IDF_TARGET_ESP8266
-        esp_log_set_putchar(&sse_logging_putchar);
-    #endif
+    esp_log_set_vprintf(&sse_logging_vprintf);
 
     return ESP_OK;
 }
@@ -253,6 +216,7 @@ esp_err_t ap_json_handler(httpd_req_t *req)
     root = cJSON_CreateArray();
 
     uint16_t ap_count = 0;
+    esp_err_t err;
 
     if( xSemaphoreTake(*(get_wifi_mutex()), pdMS_TO_TICKS(500)) == pdTRUE) {
         esp_wifi_scan_start(NULL, true);
@@ -261,20 +225,27 @@ esp_err_t ap_json_handler(httpd_req_t *req)
         ESP_ERROR_CHECK(esp_wifi_scan_get_ap_num(&ap_count));
 
         wifi_ap_record_t *ap_info = (wifi_ap_record_t *)malloc(sizeof(wifi_ap_record_t) * ap_count);
-        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_info));
+//        ESP_ERROR_CHECK(esp_wifi_scan_get_ap_records(&ap_count, ap_info));
+        err = esp_wifi_scan_get_ap_records(&ap_count, ap_info);
 
-        ESP_LOGI(TAG, "Total APs scanned = %u", ap_count);
-        for (int i = 0; i < ap_count && i <= MAX_AP_COUNT; i++) {
-            cJSON_AddItemToArray(root, fld = cJSON_CreateObject());
-            cJSON_AddItemToObject(fld, "ssid", cJSON_CreateString((const char *)ap_info[i].ssid));
-            cJSON_AddItemToObject(fld, "chan", cJSON_CreateNumber(ap_info[i].primary));
-            cJSON_AddItemToObject(fld, "rssi", cJSON_CreateNumber(ap_info[i].rssi));
-            cJSON_AddItemToObject(fld, "auth", cJSON_CreateNumber(ap_info[i].authmode));
+        if (err == ESP_OK) {
+            ESP_LOGI(TAG, "Total APs scanned = %u", ap_count);
+            for (int i = 0; i < ap_count && i <= MAX_AP_COUNT; i++) {
+                cJSON_AddItemToArray(root, fld = cJSON_CreateObject());
+                cJSON_AddItemToObject(fld, "ssid", cJSON_CreateString((const char *)ap_info[i].ssid));
+                cJSON_AddItemToObject(fld, "chan", cJSON_CreateNumber(ap_info[i].primary));
+                cJSON_AddItemToObject(fld, "rssi", cJSON_CreateNumber(ap_info[i].rssi));
+                cJSON_AddItemToObject(fld, "auth", cJSON_CreateNumber(ap_info[i].authmode));
+            }
         }
+        else {
+            ESP_LOGW(TAG, "error in esp_wifi_scan_get_ap_records");
+        }
+
         free(ap_info);
     }
     else {
-        ESP_LOGI(TAG, "Scan or connect in progress");
+       ESP_LOGW(TAG, "cannot take semaphore. wi-fi busy (ap_json_handler)");
     }
 
     out = cJSON_PrintUnformatted(root);
@@ -372,29 +343,12 @@ esp_err_t restart_json_handler(httpd_req_t *req)
     cJSON *root = cJSON_Parse(buf);
     cJSON *reset_nvs = cJSON_GetObjectItem(root, "reset-nvs");
     cJSON *reset_homekit = cJSON_GetObjectItem(root, "reset-homekit");
-    cJSON *update = cJSON_GetObjectItem(root, "update");
 
-    // if 'update' is flagged, don't perform any resets of NVS of HomeKit
-    if (cJSON_IsTrue(update)) {
-        const esp_partition_t *app0_partition;
-        app0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
-
-        err = esp_ota_set_boot_partition(app0_partition);
-        if (err != ESP_OK) {
-            ESP_LOGW(TAG, "Unable to set boot partition to '%s' at offset 0x%x",
-                            app0_partition->label, app0_partition->address);
-        } else {
-            ESP_LOGW(TAG, "Booting to '%s' at offset 0x%x. Restarting...",
-                             app0_partition->label, app0_partition->address);
-        }
-    } 
-    else {
-        if (cJSON_IsTrue(reset_nvs)) {
-            nvs_flash_erase();
-        }
-        if (cJSON_IsTrue(reset_homekit)) {
-            homekit_server_reset();
-        }
+    if (cJSON_IsTrue(reset_nvs)) {
+        nvs_flash_erase();
+    }
+    if (cJSON_IsTrue(reset_homekit)) {
+        homekit_server_reset();
     }
 
     if (err == ESP_OK) {
@@ -419,8 +373,8 @@ esp_err_t restart_json_handler(httpd_req_t *req)
 }
 
 
-/* POST handler for /updateboot. This is the OTA handler */
-esp_err_t update_boot_handler(httpd_req_t *req)
+/* POST handler for /otaupdate. */
+esp_err_t otaupdate_handler(httpd_req_t *req)
 {
     const esp_partition_t *configured = esp_ota_get_boot_partition();
     const esp_partition_t *running = esp_ota_get_running_partition();
@@ -564,18 +518,42 @@ esp_err_t getlights_json_handler(httpd_req_t *req)
     err = nvs_open("lights", NVS_READWRITE, &lights_config_handle);
     if (err == ESP_OK) {
         char *out;
-        cJSON *root, *lights_json, *fld, *invert_json;
+        cJSON *root, *lights_json, *fld;
 
         root = cJSON_CreateObject();
 
+
         // Status LED
-        uint8_t status_led_gpio = 0;
+        cJSON *status_led_json = cJSON_CreateObject();
+        cJSON_AddItemToObject(root, "status_led", status_led_json);
+
+        uint8_t status_led_gpio;
         err = nvs_get_u8(lights_config_handle, "status_led", &status_led_gpio); 
         if (err == ESP_OK) {
-            cJSON_AddItemToObject(root, "status_led", cJSON_CreateNumber(status_led_gpio));
+            cJSON_AddItemToObject(status_led_json, "led_gpio", cJSON_CreateNumber(status_led_gpio));
         }
         else {
             ESP_LOGW(TAG, "error nvs_get_u8 status_led err %d", err);
+        }
+
+        // Status LED GPIO Invert
+        uint8_t status_led_gpio_invert;
+        err = nvs_get_u8(lights_config_handle, "invert_status", &status_led_gpio_invert); 
+        if (err == ESP_OK) {
+            cJSON_AddItemToObject(status_led_json, "invert_gpio", cJSON_CreateBool(status_led_gpio_invert));
+        }
+        else {
+            ESP_LOGW(TAG, "error nvs_get_u8 invert_gpio err %d", err);
+        }
+
+        // Separate HomeKit Accessories
+        uint8_t separate_accessories;
+        err = nvs_get_u8(lights_config_handle, "sep_acc", &separate_accessories); 
+        if (err == ESP_OK) {
+            cJSON_AddItemToObject(root, "separate_accessories", cJSON_CreateBool(separate_accessories));
+        }
+        else {
+            ESP_LOGW(TAG, "error nvs_get_u8 separate_accessories err %d", err);
         }
 
         // Get configured number of lights
@@ -596,10 +574,14 @@ esp_err_t getlights_json_handler(httpd_req_t *req)
                 for (int i = 0; i < num_lights; i++) {
                     cJSON_AddItemToArray(lights_json, fld = cJSON_CreateObject());
                     cJSON_AddItemToObject(fld, "light_gpio", cJSON_CreateNumber(light_config[i].light_gpio));
+                    cJSON_AddItemToObject(fld, "invert_light_gpio", cJSON_CreateBool(light_config[i].invert_light_gpio));
                     cJSON_AddItemToObject(fld, "led_gpio", cJSON_CreateNumber(light_config[i].led_gpio));
+                    cJSON_AddItemToObject(fld, "invert_led_gpio", cJSON_CreateBool(light_config[i].invert_led_gpio));
                     cJSON_AddItemToObject(fld, "button_gpio", cJSON_CreateNumber(light_config[i].button_gpio));
+                    cJSON_AddItemToObject(fld, "invert_button_gpio", cJSON_CreateBool(light_config[i].invert_button_gpio));
                     cJSON_AddItemToObject(fld, "is_dimmer", cJSON_CreateBool(light_config[i].is_dimmer));
                     cJSON_AddItemToObject(fld, "is_remote", cJSON_CreateBool(light_config[i].is_remote));
+                    cJSON_AddItemToObject(fld, "is_hidden", cJSON_CreateBool(light_config[i].is_hidden));
 
                     int remote_cmd_len = snprintf(NULL, 0, "rem_cmd_%d", i);
                     char *remote_cmd_key = malloc(remote_cmd_len + 1);
@@ -625,27 +607,10 @@ ESP_LOGW("nvs", "key: %s value: %s", remote_cmd_key, remote_cmd_val);
                 ESP_LOGW(TAG, "error nvs_get_u8 num_lights err %d", err);
             }
 
-            //4; status, light_gpio, led_gpio, button_gpio
-            bool invert_config[4];
-            size = 4 * sizeof(bool);
-            err = nvs_get_blob(lights_config_handle, "invert", invert_config, &size);
-            if (err == ESP_OK) {
-                invert_json = cJSON_CreateObject();
-                cJSON_AddItemToObject(root, "invert", invert_json);
-                cJSON_AddItemToObject(invert_json, "status_gpio",cJSON_CreateBool(invert_config[0]));
-                cJSON_AddItemToObject(invert_json, "light_gpio",cJSON_CreateBool(invert_config[1]));
-                cJSON_AddItemToObject(invert_json, "led_gpio",cJSON_CreateBool(invert_config[2]));
-                cJSON_AddItemToObject(invert_json, "button_gpio",cJSON_CreateBool(invert_config[3]));
-            }
-            else {
-                ESP_LOGW(TAG, "error nvs_get_u8 invert err %d", err);
-            }
-
             nvs_close(lights_config_handle);
         }
 
         out = cJSON_PrintUnformatted(root);
-        
         httpd_resp_set_type(req, "application/json");
         httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate, max-age=0");
         httpd_resp_set_hdr(req, "Pragma", "no-cache");
@@ -665,7 +630,7 @@ ESP_LOGW("nvs", "key: %s value: %s", remote_cmd_key, remote_cmd_val);
 }
 
 
-/* POST handler for /setlights.json. Taks json and saves to NVS */
+/* POST handler for /setlights.json. Takes json and saves to NVS */
 esp_err_t setlights_json_handler(httpd_req_t *req)
 {
     esp_err_t err;
@@ -699,24 +664,55 @@ esp_err_t setlights_json_handler(httpd_req_t *req)
     if (err == ESP_OK) {
         cJSON *root = cJSON_Parse(buf);
 
-        // Status LED
+        esp_err_t json_err = ESP_FAIL;
+
+        // Status LED  
         cJSON *status_led_json = cJSON_GetObjectItem(root, "status_led");
-        if (cJSON_IsNumber(status_led_json) && status_led_json->valueint >= 0) { 
-            if (status_led_json->valueint <= 16 ) {
-                err = nvs_set_u8(lights_config_handle, "status_led", status_led_json->valueint); 
-                if (err == ESP_OK) {
-                    ESP_LOGI(TAG, "status_led %d", status_led_json->valueint);
+        if (cJSON_IsObject(status_led_json)) {
+            cJSON *status_led_gpio_json = cJSON_GetObjectItem(status_led_json, "led_gpio");
+            if (cJSON_IsNumber(status_led_gpio_json) && status_led_gpio_json->valueint <= 32 ) {
+                json_err = nvs_set_u8(lights_config_handle, "status_led", status_led_gpio_json->valueint);
+                if (json_err == ESP_OK) { 
+                    ESP_LOGI(TAG, "status led gpio: %d", status_led_gpio_json->valueint);
                 } else {
-                    ESP_LOGW(TAG, "error nvs_set_u8 status_led %d err %d", status_led_json->valueint, err);
+                    ESP_LOGE(TAG, "error with status_led_gpio_json nvs store");
                 }
+            } else {
+                ESP_LOGE(TAG, "error status_led_gpio_json not a number, or greater than 32");
             }
-        } 
-        else {
-            ESP_LOGE(TAG, "error parsing status_led json");
+
+            cJSON *status_led_invert_gpio_json = cJSON_GetObjectItem(status_led_json, "invert_gpio");
+            if (cJSON_IsBool(status_led_invert_gpio_json)) { 
+                bool status_led_gpio_invert = cJSON_IsTrue(status_led_invert_gpio_json);
+                json_err = nvs_set_u8(lights_config_handle, "invert_status", status_led_gpio_invert); 
+                if (json_err == ESP_OK) { 
+                    ESP_LOGI(TAG, "status led invert gpio: %s", status_led_gpio_invert ? "true" : "false");
+                } else {
+                    ESP_LOGE(TAG, "error with status_led_gpio_invert nvs store");
+                }
+            } else {
+                ESP_LOGE(TAG, "error with status_led_invert_gpio_json not a bool");
+            }
+        } else {
+            ESP_LOGE(TAG, "error with status_led_json not an object");
         }
 
-        cJSON *lights_json = cJSON_GetObjectItem(root, "lights");
+        // Separate Accessories Flag  
+        cJSON *separate_accessories_json = cJSON_GetObjectItem(root, "separate_accessories");
+        if (cJSON_IsBool(separate_accessories_json)) { 
+            bool separate_accessories = cJSON_IsTrue(separate_accessories_json);
+            json_err = nvs_set_u8(lights_config_handle, "sep_acc", separate_accessories); 
+            if (json_err == ESP_OK) { 
+                ESP_LOGI(TAG, "separate homekit accessories: %s", separate_accessories ? "true" : "false");
+            } else {
+                ESP_LOGE(TAG, "error with separate_accessories_json nvs store");
+            }
+        } else {
+            ESP_LOGE(TAG, "error with separate_accessories_json not a bool");
+        }
 
+
+        cJSON *lights_json = cJSON_GetObjectItem(root, "lights");
         if (cJSON_IsArray(lights_json)) {
             uint8_t num_lights = cJSON_GetArraySize(lights_json);
 
@@ -729,25 +725,59 @@ esp_err_t setlights_json_handler(httpd_req_t *req)
             uint8_t i = 0;
             cJSON_ArrayForEach(fld, lights_json) {
                 cJSON *key = cJSON_GetObjectItem(fld, "light_gpio");
-                if (cJSON_IsNumber(key) && key->valueint >= 0) { 
-                    if (key->valueint <= 16 ) {
-                        light_config[i].light_gpio = key->valueint; 
-                    }
+                if (cJSON_IsNumber(key) && key->valueint <= 32 ) {
+                    light_config[i].light_gpio = key->valueint; 
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].light_gpio not a number, or gpio greater than 32", i);
                 }
                 key = cJSON_GetObjectItem(fld, "led_gpio");
-                if (cJSON_IsNumber(key) && key->valueint >= 0) { 
-                    if (key->valueint <= 16 ) {
-                        light_config[i].led_gpio = key->valueint; 
-                    }
+                if (cJSON_IsNumber(key) && key->valueint <= 32 ) {
+                    light_config[i].led_gpio = key->valueint; 
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].led_gpio not a number, or gpio greater than 32", i);
                 }
                 key = cJSON_GetObjectItem(fld, "button_gpio");
-                if (cJSON_IsNumber(key) && key->valueint >= 0) { 
-                    if (key->valueint <= 16 ) {
-                        light_config[i].button_gpio = key->valueint; 
-                    }
+                if (cJSON_IsNumber(key) && key->valueint <= 32 ) {
+                    light_config[i].button_gpio = key->valueint; 
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].button_gpio not a number, or gpio greater than 32", i);
                 }
-                light_config[i].is_dimmer = cJSON_IsTrue(cJSON_GetObjectItem(fld, "is_dimmer"));
-                light_config[i].is_remote = cJSON_IsTrue(cJSON_GetObjectItem(fld, "is_remote"));
+                key = cJSON_GetObjectItem(fld, "invert_light_gpio");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].invert_light_gpio = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].invert_light_gpio not a bool", i);
+                } 
+                key = cJSON_GetObjectItem(fld, "invert_led_gpio");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].invert_led_gpio = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].invert_led_gpio not a bool", i);
+                } 
+                key = cJSON_GetObjectItem(fld, "invert_button_gpio");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].invert_button_gpio = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].invert_button_gpio not a bool", i);
+                } 
+                key = cJSON_GetObjectItem(fld, "is_dimmer");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].is_dimmer = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].is_dimmer not a bool", i);
+                } 
+                key = cJSON_GetObjectItem(fld, "is_remote");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].is_remote = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].is_remote not a bool", i);
+                } 
+                key = cJSON_GetObjectItem(fld, "is_hidden");
+                if (cJSON_IsBool(key)) { 
+                    light_config[i].is_hidden = cJSON_IsTrue(key);
+                } else {
+                    ESP_LOGE(TAG, "error with lights[%d].is_hidden not a bool", i);
+                } 
 
                 key = cJSON_GetObjectItem(fld, "remote_cmd");
                 if (!light_config[i].is_remote || !cJSON_IsObject(key)) {
@@ -761,43 +791,30 @@ esp_err_t setlights_json_handler(httpd_req_t *req)
                 }
             }
 
-            cJSON *invert_json = cJSON_GetObjectItem(root, "invert");
-            //4; status, light_gpio, led_gpio, button_gpio
-            bool invert[4] = {0};
-            invert[0] = cJSON_IsTrue(cJSON_GetObjectItem(invert_json, "status_gpio"));
-            invert[1] = cJSON_IsTrue(cJSON_GetObjectItem(invert_json, "light_gpio"));
-            invert[2] = cJSON_IsTrue(cJSON_GetObjectItem(invert_json, "led_gpio"));
-            invert[3] = cJSON_IsTrue(cJSON_GetObjectItem(invert_json, "button_gpio"));
-
             ESP_LOGI(TAG, 
-                "          Light  LED   Button  Dimmable? Remote?");
+                "          Light  LED   Button  Dimmable  Remote  Hidden");
             for (i = 0; i < num_lights; i++) {
                 ESP_LOGI(TAG, 
-                "Light %d    %2d     %2d     %2d     %s     %s", (i + 1), light_config[i].light_gpio, light_config[i].led_gpio, light_config[i].button_gpio, 
-                                                                    light_config[i].is_dimmer ? "true" : "false", light_config[i].is_remote ? "true" : "false");
+                    "Light %d    %2d     %2d     %2d     %s     %s     %s", (i + 1), light_config[i].light_gpio, light_config[i].led_gpio, light_config[i].button_gpio, 
+                                                                    light_config[i].is_dimmer ? "true" : "false", light_config[i].is_remote ? "true" : "false", light_config[i].is_hidden ? "true" : "false");
+                ESP_LOGI(TAG, 
+                    "Invert   %5s  %5s  %5s ", light_config[i].invert_light_gpio ? "true" : "false", light_config[i].invert_led_gpio ? "true" : "false", light_config[i].invert_button_gpio ? "true" : "false");
+
                 if (light_config[i].is_remote) {
                     ESP_LOGI(TAG, 
                     " Command   %s", remote_cmd[i]);
                 }
             }
-            ESP_LOGI(TAG, 
-                "Invert   %5s  %5s  %5s ", invert[1] ? "true" : "false", invert[2] ? "true" : "false", invert[3] ? "true" : "false");
 
             err = nvs_set_u8(lights_config_handle, "num_lights", num_lights);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "error nvs_set_u8 num_lights %d err %d", num_lights, err);
+                ESP_LOGE(TAG, "error nvs_set_u8 num_lights %d err %d", num_lights, err);
             }
 
             size_t size = num_lights * sizeof(lights_t);
             err = nvs_set_blob(lights_config_handle, "config", light_config, size);
             if (err != ESP_OK) {
-                ESP_LOGW(TAG, "error nvs_set_blob lights size %d err %d", size, err);
-            }
-
-            size = 4 * sizeof(bool);
-            err = nvs_set_blob(lights_config_handle, "invert", invert, size);
-            if (err != ESP_OK) {
-                ESP_LOGW(TAG, "error nvs_set_blob invert size %d err %d", size, err);
+                ESP_LOGE(TAG, "error nvs_set_blob lights size %d err %d", size, err);
             }
 
             for (i = 0; i < num_lights; i++) {
@@ -912,34 +929,24 @@ esp_err_t start_webserver(void)
         };
         httpd_register_uri_handler(server, &server_side_event_registration_page);
 
-        // Used to update OTA
+        // OTA
         httpd_uri_t update_boot_page = {
-            .uri       = "/updateboot",
+            .uri       = "/otaupdate",
             .method    = HTTP_POST,
-            .handler   = update_boot_handler,
+            .handler   = otaupdate_handler,
             .user_ctx  = NULL
         };
         httpd_register_uri_handler(server, &update_boot_page);
 
         // esp_event_handler_register is being deprecated
-        #ifdef CONFIG_IDF_TARGET_ESP32
-            ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &wifi_event_handler_instance));
-            ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &ip_event_handler_instance));
-        #elif CONFIG_IDF_TARGET_ESP8266
-            ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
-            ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL));
-        #endif
-        
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &wifi_event_handler_instance));
+        ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &ip_event_handler_instance));
+
         // Task to accept messages from queue and send to SSE clients
         q_sse_message_queue = xQueueCreate( 10, sizeof(char)*LOG_BUF_MAX_LINE_SIZE );
         xTaskCreate(&sse_logging_task, "sse", 2048, NULL, 4, &t_sse_task_handle);
 
-        #ifdef CONFIG_IDF_TARGET_ESP32
-            esp_log_set_vprintf(&sse_logging_vprintf);
-        #elif CONFIG_IDF_TARGET_ESP8266
-            esp_log_set_putchar(&sse_logging_putchar);
-        #endif
-        
+        esp_log_set_vprintf(&sse_logging_vprintf);
 
         return ESP_OK;
     }
@@ -951,19 +958,10 @@ esp_err_t start_webserver(void)
 void stop_webserver(void)
 {
     // esp_event_handler_register is being deprecated
-    #ifdef CONFIG_IDF_TARGET_ESP32
-        ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler_instance));
-        ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler_instance));
-    #elif CONFIG_IDF_TARGET_ESP8266
-        ESP_ERROR_CHECK(esp_event_handler_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler));
-        ESP_ERROR_CHECK(esp_event_handler_unregister(IP_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler));
-    #endif
-    
-    #ifdef CONFIG_IDF_TARGET_ESP32
-        esp_log_set_vprintf(vprintf);
-    #elif CONFIG_IDF_TARGET_ESP8266
-        esp_log_set_putchar(putchar);
-    #endif
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, &wifi_event_handler_instance));
+    ESP_ERROR_CHECK(esp_event_handler_instance_unregister(IP_EVENT, ESP_EVENT_ANY_ID, &ip_event_handler_instance));
+
+    esp_log_set_vprintf(vprintf);
     
     vTaskDelete(t_sse_task_handle);
     vQueueDelete(q_sse_message_queue);

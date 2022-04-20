@@ -1,3 +1,9 @@
+/* 
+    Version History
+    ---------------
+    9.0.4   20-Apr-2023     tidied up http cpde - still had old boot partition code used on esp8266
+*/
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <freertos/timers.h>
@@ -13,6 +19,8 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "esp_event.h"
+#include "esp_ota_ops.h"
+#include "esp_image_format.h"
 
 #include "esp_wifi.h"
 #include "wifi.h"
@@ -44,19 +52,21 @@ static const char *TAG = "main";
 static led_status_t led_status;
 static bool status_error = false;
 
-static led_status_pattern_t ap_mode = LED_STATUS_PATTERN({1000, -1000});
+static led_status_pattern_t normal_mode = LED_STATUS_PATTERN({1, -20000});
 static led_status_pattern_t led_status_error = LED_STATUS_PATTERN({100, -100});
+static led_status_pattern_t ap_mode = LED_STATUS_PATTERN({1000, -1000});
 static led_status_pattern_t remote_error = LED_STATUS_PATTERN({50, -50, 50, -50, 50, -50, 50, -50, 50, -50, 50, -50});
-static led_status_pattern_t normal_mode = LED_STATUS_PATTERN({10, -9990});
 static led_status_pattern_t identify = LED_STATUS_PATTERN({100, -100, 100, -350, 100, -100, 100, -350, 100, -100, 100, -350});
 
 typedef struct _light {
     uint8_t light_gpio;             // relay/light
+    bool invert_light_gpio;
     uint8_t led_gpio;   
+    bool invert_led_gpio;
 
     bool is_dimmer;
     bool is_remote;
-    bool is_homekit_enabled;
+    bool is_hidden;
 
     homekit_service_t* service;     // associated service (ON and BRIGHTNESS)
 
@@ -80,15 +90,10 @@ typedef struct _light {
 
 static light_service_t *lights = NULL;
 
-// Invert status is common for each type (light, led, button, status) and 
-//  is stored in NVS as a blob
-bool light_gpio_inverted;
-bool led_gpio_inverted;
+// from nvs. flag to indicate if each light should be a separate accessory (to have separate rooms)
+bool separate_accessories;
 
 static homekit_accessory_t *accessories[5];
-
-
-
 
 
 void status_led_identify(homekit_value_t _value) {
@@ -220,6 +225,8 @@ static void remote_hk_task(void * arg)
     char *out = cJSON_PrintUnformatted(hk_command.light->nvs_command);
     ESP_LOGW("NVS PAYLOAD", "key: \"payload\" value: %s", out);
     free(out);
+
+    ESP_LOGW(TAG, "mdns query host %s", host_json->valuestring);
 
                 // use 'host' and resolve IP address
                 //    (bug esp-idf #5521) workaround: use mdns library to resolve hostname
@@ -428,34 +435,6 @@ static void remote_hk_task(void * arg)
 // ******* End Remote Command Stuff ******* //
 
 
-void lightbulb_on_callback(homekit_characteristic_t *_ch, homekit_value_t value, void *context) {
-    if (value.format != homekit_format_bool) {
-        ESP_LOGE(TAG, "Invalid value format: %d", value.format);
-        return;
-    }
-
-    light_service_t *light = (light_service_t*) context;
-
-
-    if (light->is_dimmer) {
-        homekit_characteristic_t *brightness_c = homekit_service_characteristic_by_type(
-                    _ch->service, HOMEKIT_CHARACTERISTIC_BRIGHTNESS );
-//        double gamma = pow(((brightness_c->value.int_value+25.0)/125.0),2.2)*100.0;
-//        pwm_set_duty(light->pwm_channel, value.bool_value ? (uint32_t)(gamma * PWM_PERIOD_IN_US/100) : 0);
-//        pwm_start();
-
-        // if the light is turned off, set the direction up for the next time the light turns on
-        //  it makes sense that, if it turns on greater than 50% brightness, that the next
-        //  dim direction should be to dim the lights.
-        if (value.bool_value == false) {
-            light->dim_direction = brightness_c->value.int_value > 50 ? -1 : 1;
-        }
-    }
-    else {
-        gpio_set_level(light->light_gpio, light_gpio_inverted ? !value.bool_value : value.bool_value); 
-    }
-}
-
 void lightbulb_brightness_callback(homekit_characteristic_t *_ch, homekit_value_t value, void *context) {
     if (value.format != homekit_format_int) {
         ESP_LOGE(TAG, "Invalid value format: %d", value.format);
@@ -511,12 +490,20 @@ static void light_dim_timer_callback(TimerHandle_t timer) {
 
 }
 
+
 // Need to call this function from a task different to the button_callback (executing in Tmr Svc)
 // Have had occurrences when, if called from button_callback directly, the scheduler seems
 // to lock up. 
 static void start_ap_task(void * arg) {
-    ESP_LOGI(TAG, "start ap task");
-    start_ap_prov();
+    
+    wifi_mode_t wifi_mode;
+    esp_wifi_get_mode(&wifi_mode);
+    if (wifi_mode != WIFI_MODE_APSTA) {
+        start_ap_prov();
+        ESP_LOGI(TAG, "start ap task");
+    } else {
+        ESP_LOGW(TAG, "already in ap mode");
+    }
     vTaskDelete(NULL);
 }
 
@@ -526,16 +513,18 @@ static void main_event_handler(void* arg, esp_event_base_t event_base,  int32_t 
     if (event_base == WIFI_EVENT) {
         if (event_id == WIFI_EVENT_AP_START || event_id == WIFI_EVENT_STA_DISCONNECTED) {
             led_status_set(led_status, &ap_mode);
-        } else if (event_id == WIFI_EVENT_AP_STOP) {
-            led_status_set(led_status, status_error ? &led_status_error : &normal_mode);
         } 
+        else if (event_id == WIFI_EVENT_AP_STOP) {
+            led_status_set(led_status, status_error ? &led_status_error : &normal_mode);
+        }
     } else if (event_base == IP_EVENT) {
         if (event_id == IP_EVENT_STA_GOT_IP) {
             wifi_mode_t wifi_mode;
             esp_wifi_get_mode(&wifi_mode);
             if (wifi_mode == WIFI_MODE_STA) {
                 led_status_set(led_status, status_error ? &led_status_error : &normal_mode);
-            } else {
+            }
+            else {
                 led_status_set(led_status, &ap_mode);
             }
         }
@@ -554,10 +543,10 @@ static void main_event_handler(void* arg, esp_event_base_t event_base,  int32_t 
         light_service_t *light = (light_service_t *) *((uintptr_t*)event_data);
 
         if (event_id == BUTTON_EVENT_UP) {
-            gpio_set_level(light->led_gpio, led_gpio_inverted ? 1 : 0);
+            gpio_set_level(light->led_gpio, light->invert_led_gpio ? 1 : 0);
         }
         else if (event_id == BUTTON_EVENT_DOWN) {
-            gpio_set_level(light->led_gpio, led_gpio_inverted ? 0 : 1);
+            gpio_set_level(light->led_gpio, light->invert_led_gpio ? 0 : 1);
         }
 
         else if (event_id == BUTTON_EVENT_DOWN_HOLD) {
@@ -611,30 +600,33 @@ static void main_event_handler(void* arg, esp_event_base_t event_base,  int32_t 
                     xQueueSendToBack(q_remotehk_message_queue, (void *) &remote_cmd, (TickType_t) 0);
                 }
                 else {     
-
-                    // Toggle ON
-                    //bool on = on_c->value.bool_value;
-                    //on_c->value = HOMEKIT_BOOL(!on);
-
+                    // toggle relay/light
                     light->on = !light->on;
 
+                    // change/light relay value
+                    gpio_set_level(light->light_gpio, light->invert_light_gpio ? !light->on : light->on); 
 
-                    // if homekit is enabled
-                    if (1) {
-                            
-                        homekit_service_t *acc_service = homekit_service_by_type(light->service->accessory, HOMEKIT_SERVICE_ACCESSORY_INFORMATION);
-                        homekit_characteristic_t *acc_service_manufacture  = homekit_service_characteristic_by_type(acc_service, HOMEKIT_CHARACTERISTIC_MANUFACTURER);
-                        ESP_LOGE(TAG, "Button Press ***** Manufacturer NAME char %s", acc_service_manufacture->value.string_value ); 
 
-                        homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
-                        ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
 
+                    // if not hidden (homekit enabled)
+                    if (!light->is_hidden) {
+
+
+/*
+            homekit_service_t *acc_service = homekit_service_by_type(light->service->accessory, HOMEKIT_SERVICE_ACCESSORY_INFORMATION);
+            homekit_characteristic_t *acc_service_manufacture  = homekit_service_characteristic_by_type(acc_service, HOMEKIT_CHARACTERISTIC_MANUFACTURER);
+            ESP_LOGE(TAG, "Button Press ***** Manufacturer NAME char %s", acc_service_manufacture->value.string_value ); 
+
+            homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
+            ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
+*/
 
 
                         // Get the service and characteristics
                         homekit_characteristic_t *on_c =  homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_ON);   
                         // Unlike .setter_ex function, this is absolutely required to update clients instantly
                         homekit_characteristic_notify(on_c, HOMEKIT_BOOL(light->on));
+
 
                     }
 
@@ -667,7 +659,7 @@ static void main_event_handler(void* arg, esp_event_base_t event_base,  int32_t 
             // restart 
             else if (event_id == 5) {
                 // use 'led_status_error' flashing (fast flash) to indicate about to restart
-                led_status_set(led_status, &led_status_error);
+                led_status_signal(led_status, &led_status_error);
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 esp_restart();
             } 
@@ -694,23 +686,52 @@ void button_callback(button_event_t event, void* context) {
 }
 
 
-homekit_server_config_t config = {
-    .accessories = accessories,
-    .password = "111-11-111",
-    .on_event = homekit_on_event,
-};
+// this is called from the timer
+void lightbulb_on_callback(homekit_characteristic_t *_ch, homekit_value_t value, void *context) {
+    if (value.format != homekit_format_bool) {
+        ESP_LOGE(TAG, "Invalid value format: %d", value.format);
+        return;
+    }
+
+    light_service_t *light = (light_service_t*) context;
 
 
+    if (light->is_dimmer) {
+        homekit_characteristic_t *brightness_c = homekit_service_characteristic_by_type(
+                    _ch->service, HOMEKIT_CHARACTERISTIC_BRIGHTNESS );
+
+
+//        double gamma = pow(((brightness_c->value.int_value+25.0)/125.0),2.2)*100.0;
+//        pwm_set_duty(light->pwm_channel, value.bool_value ? (uint32_t)(gamma * PWM_PERIOD_IN_US/100) : 0);
+//        pwm_start();
+
+
+        // if the light is turned off, set the direction up for the next time the light turns on
+        //  it makes sense that, if it turns on greater than 50% brightness, that the next
+        //  dim direction should be to dim the lights.
+        if (value.bool_value == false) {
+            light->dim_direction = brightness_c->value.int_value > 50 ? -1 : 1;
+        }
+    }
+    else {
+
+    }
+}
+
+
+// functions for setter_ex, getter_ex for ON and BRIGHTNESS
 homekit_value_t light_on_get(homekit_characteristic_t *ch) {
 
     light_service_t *light = (light_service_t*) ch->context;
 
-                    homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
-                    ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
+/*
+            homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
+            ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
 
-    ESP_LOGE(TAG, "GET Characteristic %s", ch->description);
-    ESP_LOGE(TAG, "GET Current Characteristic Value %d", ch->value.bool_value);
-    ESP_LOGE(TAG, "GET Value in light_service_t %d", light->on);
+            ESP_LOGE(TAG, "GET Characteristic %s", ch->description);
+            ESP_LOGE(TAG, "GET Current Characteristic Value %d", ch->value.bool_value);
+            ESP_LOGE(TAG, "GET Value in light_service_t %d", light->on);
+*/
 
     return HOMEKIT_BOOL(light->on);
 
@@ -721,40 +742,39 @@ void light_on_set(homekit_characteristic_t *ch, homekit_value_t value) {
 
     light_service_t *light = (light_service_t*) ch->context;
 
+/*
+            homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
+            ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
 
-                    homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
-                    ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
-
-
-    ESP_LOGE(TAG, "SET Characteristic %s", ch->description);
-    ESP_LOGE(TAG, "SET Requested Value %d", value.bool_value);
-    ESP_LOGE(TAG, "SET Current Value %d", ch->value.bool_value);
-    ESP_LOGE(TAG, "SET Current Value in light_service_t %d", light->on);
-
-    // ch->value is the currently stored value
-    // value is the requested value from HomeKit app
-
+            ESP_LOGE(TAG, "SET Characteristic %s", ch->description);
+            ESP_LOGE(TAG, "SET Requested Value %d", value.bool_value);
+            ESP_LOGE(TAG, "SET Current Value %d", ch->value.bool_value);
+            ESP_LOGE(TAG, "SET Current Value in light_service_t %d", light->on);
+*/
 
     // we avoid using this, as homekit disabled lights will not have a service/characteristic to store the value in
-//    ch->value = value;
-
+    // ch->value = value;
+    // use the global struct variable instead
     light->on = value.bool_value;
 
+                    ESP_LOGE(TAG, "SET New Value %d", ch->value.bool_value);
+                    ESP_LOGE(TAG, "SET New Value in light_service_t %d", light->on);
 
-
-    // call gpio function to change relay value
-
+    // change/light relay value
+    gpio_set_level(light->light_gpio, light->invert_light_gpio ? !light->on : light->on); 
 
     // This is not required. Tested with iPhone and iPad open. They are both updated instantly.
     //homekit_characteristic_notify(ch, ch->value);
 
-    ESP_LOGE(TAG, "SET New Value %d", ch->value.bool_value);
-    ESP_LOGE(TAG, "SET New Value in light_service_t %d", light->on);
-
-
-
 }
 
+
+
+homekit_server_config_t config = {
+    .accessories = accessories,
+    .password = "111-11-111",
+    .on_event = homekit_on_event,
+};
 
 void init_accessory() {
     light_service_t *light = lights;
@@ -773,29 +793,30 @@ void init_accessory() {
 
     homekit_service_t* accessory_service = NULL;
 
-    // need to read this from config. treat each light service as a separate accessory (to put in different rooms)
-    bool separate = true;
+    uint8_t macaddr[6];
+    esp_read_mac(macaddr, ESP_MAC_WIFI_STA);
+    int name_len = snprintf( NULL, 0, "esp-%02x%02x%02x", macaddr[3], macaddr[4], macaddr[5] );
+    char *name_value = malloc(name_len + 1);
+    snprintf( name_value, name_len + 1, "esp-%02x%02x%02x", macaddr[3], macaddr[4], macaddr[5] ); 
 
     while (light) {
-
-        // if homekit enable and not a remote
-        if (!light->is_remote) {
-
+        // if not a remote and not hidden (homekit enable)
+        if (!light->is_remote && !light->is_hidden) {
+            // first pass through, create the accessory service to be common for all accessories (if separate accessories)
             if (!accessory_service) {
-                uint8_t macaddr[6];
-                esp_read_mac(macaddr, ESP_MAC_WIFI_STA);
-                int name_len = snprintf( NULL, 0, "esp-%02x%02x%02x", macaddr[3], macaddr[4], macaddr[5] );
-                char *name_value = malloc(name_len + 1);
-                snprintf( name_value, name_len + 1, "esp-%02x%02x%02x", macaddr[3], macaddr[4], macaddr[5] ); 
+
+                esp_app_desc_t app_desc;
+                const esp_partition_t *running = esp_ota_get_running_partition();
+                esp_ota_get_partition_description(running, &app_desc);
 
                 // NEW_HOMEKIT_SERVICE uses calloc to save the data on the heap, then returns the address which is saved in a local pointer
                 //  The NEW_HOMEKIT_ACCESSORY copies this pointer to a memory location on the heap
                 accessory_service = NEW_HOMEKIT_SERVICE(ACCESSORY_INFORMATION, .characteristics=(homekit_characteristic_t*[]) {
                     NEW_HOMEKIT_CHARACTERISTIC(NAME, name_value),
-                    NEW_HOMEKIT_CHARACTERISTIC(MANUFACTURER, "MikeKit"),
-                    NEW_HOMEKIT_CHARACTERISTIC(SERIAL_NUMBER, "037A2BABF19D"),
-                    NEW_HOMEKIT_CHARACTERISTIC(MODEL, "MyLights"),
-                    NEW_HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, "1.1"),
+                    NEW_HOMEKIT_CHARACTERISTIC(MANUFACTURER, "Riksman"),
+                    NEW_HOMEKIT_CHARACTERISTIC(SERIAL_NUMBER, name_value),
+                    NEW_HOMEKIT_CHARACTERISTIC(MODEL, "ESP-C3-12F"),
+                    NEW_HOMEKIT_CHARACTERISTIC(FIRMWARE_REVISION, app_desc.version),
                     NEW_HOMEKIT_CHARACTERISTIC(IDENTIFY, status_led_identify),
                     NULL
                 });
@@ -834,50 +855,62 @@ void init_accessory() {
             }
             *(c++) = NULL;
  
-
+            // if dimmer, use LIGHTBULB Service to use BRIGHTNESS Characteristic
+            // if not a dimmer, use SWITCH Service, so we can choose the icon to be a Fan or Light.
+            if (light->is_dimmer) {
+                *s = NEW_HOMEKIT_SERVICE(LIGHTBULB,  .characteristics=characteristics);
+            }
+            else {
+                *s = NEW_HOMEKIT_SERVICE(SWITCH,  .characteristics=characteristics);
+            }
             // save the address returned by calloc into light->service as well
-            *s = NEW_HOMEKIT_SERVICE(LIGHTBULB,  .characteristics=characteristics);
             light->service = *s;
             s++;
  
-        }
+            // if each light/service is to be a separate accessory
+            if (separate_accessories) {
+                // end this services array
+                *(s++) = NULL;
+                // create the accessory (copies the local array of homekit_service_t pointers to the heap) 
+                //  and save the calloc address to the global accessories[] array
+                *(a++) = NEW_HOMEKIT_ACCESSORY(.category=homekit_accessory_category_lightbulb, .services=services);
 
-        // if separate accessories
-        if (separate) {
-            // end this services array
-            *(s++) = NULL;
-            // create the accessory (copies the local array of homekit_service_t pointers to the heap) 
-            //  and save the calloc address to the global accessories[] array
-            *(a++) = NEW_HOMEKIT_ACCESSORY(.category=homekit_accessory_category_lightbulb, .services=services);
+                // reuse the services array and start again with a new accessory
+                s = services;
+                // each new accessory needs the accessory_service
+                *(s++) = accessory_service;
 
-            // reuse the services array and start again with a new accessory
-            s = services;
-            // each new accessory needs the accessory_service
-            *(s++) = accessory_service;
+            }
 
+            // only used for naming lights. not really required
+            hk_light_idx++; 
         }
 
         // linked list, next light
         light = light->next;
-
-        // only used for naming lights. not really required
-        hk_light_idx++;
-
     }
 
 
     // out of all the lights (light_service_t linked list), were there any that were homekit enabled? 
-    //  if accessory_service exists, then yes
+    //  if accessory_service exists, then the answer is 'yes'
     if (accessory_service) {
         // if it isn't separate accessories, then end the accessory definition
-        if (!separate) {
+        if (!separate_accessories) {
             *(s++) = NULL;
             *(a++) = NEW_HOMEKIT_ACCESSORY(.category=homekit_accessory_category_lightbulb, .services=services);
-
         }
 
         // must end the array of pointers with a NULL
         *(a++) = NULL;
+
+        // start the homekit server
+        homekit_server_init(&config);
+    }
+    // if homekit doesn't initialise, we still need to start the mdns service
+    else {
+        mdns_init();   
+        mdns_hostname_set(name_value);
+        mdns_instance_name_set(name_value);
     }
 
 }
@@ -886,53 +919,58 @@ void init_accessory() {
 
 
 
-/* 
-   Returns number of hardware lights attached to the switch.
-    -1 error during configuration
-     0 no hardware lights, only remote devices. do not start homekit!
-    >0 at least one hardware device. start homekit.
+/*
+    Loads config from NVS and configures peripherals. 
+    Returns ESP_OK NVS was retrieved without error, and devices configured successfully
 */
-int8_t configure_peripherals() {
+esp_err_t configure_peripherals() {
+    size_t size;
+    esp_err_t err;
+    uint8_t status_led_gpio, status_led_gpio_invert, num_lights;
     nvs_handle lights_config_handle;
-    esp_err_t err = nvs_open("lights", NVS_READWRITE, &lights_config_handle);
+ 
+    err = nvs_open("lights", NVS_READWRITE, &lights_config_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_open err %d ", err);
-        return -1;
-    }
-
-    // Invert configuration for GPIOs; status_gpio [0], light_gpio [1], led_gpio [2], button_gpio [3]
-    bool invert[4];
-    size_t size = sizeof(invert)/sizeof(invert[0]);     
-    err = nvs_get_blob(lights_config_handle, "invert", invert, &size);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "nvs_get_blob invert err %d ", err);
-        nvs_close(lights_config_handle);
-        return -1;
+        return err;
     }
 
     // Status LED
-    uint8_t status_led_gpio = 0;
     err = nvs_get_u8(lights_config_handle, "status_led", &status_led_gpio); 
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "error nvs_get_u8 status_led err %d", err);
         nvs_close(lights_config_handle);
-        return -1;
+        return err;
     }
-    led_status = led_status_init(status_led_gpio, invert[0] ? false : true);
+    // Status LED GPIO Invert
+    err = nvs_get_u8(lights_config_handle, "invert_status", &status_led_gpio_invert); 
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "error nvs_get_u8 invert_status err %d", err);
+        nvs_close(lights_config_handle);
+        return err;
+    }
 
-    // used throughout main program
-    light_gpio_inverted = invert[1];
-    led_gpio_inverted = invert[2];
+    // led_status_init needs to know 'active level'. so a value of 0 means when the pin is LOW, the LED is ON (active 0)
+    //  normally, 1 = LED on. So invert flag means 0 = LED on. 
+    uint8_t led_status_active_level = status_led_gpio_invert ? 0 : 1;
+    led_status = led_status_init(status_led_gpio, led_status_active_level);
+
+    // separate accessories? if selected, each light/service will be a separate accessory (so they can be in different rooms)
+    err = nvs_get_u8(lights_config_handle, "sep_acc", &separate_accessories); 
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "error nvs_get_u8 sep_acc err %d", err);
+        nvs_close(lights_config_handle);
+        return err;
+    }
 
     // button configuration
     button_config_t button_config = {
-        .active_level = invert[3] ? BUTTON_ACTIVE_LOW : BUTTON_ACTIVE_HIGH,
         .repeat_press_timeout = 300,
         .long_press_time = 10000,
     };
 
     // Get configured number of lights
-    uint8_t num_lights = 0;
+    num_lights = 0;
     err = nvs_get_u8(lights_config_handle, "num_lights", &num_lights);
     if (err != ESP_OK || num_lights == 0) {
         if (err != ESP_OK) {
@@ -942,7 +980,7 @@ int8_t configure_peripherals() {
             ESP_LOGE(TAG, "error no lights configured");
         }
         nvs_close(lights_config_handle);
-        return -1;
+        return err;
     } 
 
     // From lights.h - NVS config blob
@@ -952,10 +990,11 @@ int8_t configure_peripherals() {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "nvs_get_blob config err %d ", err);
         nvs_close(lights_config_handle);
-        return -1;
+        return err;
     }
 
     // if there are ONLY remote switches, then homekit should not be started
+    // ******************** we don't need to check here - the homekit_init will check for is_remote and is_hidden
     uint8_t num_remote_lights = 0;   
   
     // create temporary arrays used for PWM configuration
@@ -977,11 +1016,15 @@ int8_t configure_peripherals() {
 
         // save NVS data to light config
         light->light_gpio = light_config[i].light_gpio; 
+        light->invert_light_gpio = light_config[i].invert_light_gpio; 
         light->led_gpio = light_config[i].led_gpio;
+        light->invert_led_gpio = light_config[i].invert_led_gpio;
         light->is_dimmer = light_config[i].is_dimmer; 
         light->is_remote = light_config[i].is_remote; 
-    
+        light->is_hidden = light_config[i].is_hidden; 
+
         // hardware button 
+        button_config.active_level = light_config[i].invert_button_gpio ? BUTTON_ACTIVE_LOW : BUTTON_ACTIVE_HIGH;
         err = button_create(light_config[i].button_gpio, button_config, button_callback, light);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "error button %d button_create err %d ", i, err);
@@ -997,7 +1040,7 @@ int8_t configure_peripherals() {
             free(light);
             continue;
         }
-        gpio_set_level(light->led_gpio, led_gpio_inverted ? 1 : 0);
+        gpio_set_level(light->led_gpio, light->invert_led_gpio ? 1 : 0);
 
         if(light->is_remote) {
             // retrieve configured nvs command with 'host' and 'payload' keys
@@ -1018,6 +1061,8 @@ int8_t configure_peripherals() {
             
             // nvs configuration will be stored as cJSON for life of light
             light->nvs_command = cJSON_Parse(remote_cmd_val);
+
+            ESP_LOGI(TAG, "remote command:  %s", remote_cmd_val);
 
             free(remote_cmd_key);
             free(remote_cmd_val);
@@ -1050,15 +1095,11 @@ int8_t configure_peripherals() {
             num_remote_lights++;
         }
         else if (light->is_dimmer) {
-            // PWM configuration - add to pins array ready for configuration. only required for hardware dimming
-//            pins[i_pwm] = light->light_gpio;
-//            duties[i_pwm] = 0;
-//            phases[i_pwm] = 0;
-//            pwm_invert_mask |= (light_gpio_inverted << i_pwm);
 
-            // store PWM channel number and incrememnt
-//            light->pwm_channel = i_pwm;
-//            i_pwm++;
+            // PWM configuration - add to pins array ready for configuration. only required for hardware dimming
+//
+//
+// *******************************************************
 
             // create timer for long button hold - dimming function
             // 100ms per 2% is 5s
@@ -1076,7 +1117,7 @@ int8_t configure_peripherals() {
                 free(light);
                 continue;
             }
-            gpio_set_level(light->light_gpio, light_gpio_inverted ? 1 : 0);
+            gpio_set_level(light->light_gpio, light->invert_light_gpio ? 1 : 0);
         }
 
         light->next = lights;
@@ -1092,10 +1133,10 @@ int8_t configure_peripherals() {
 //        err |= pwm_set_phases(phases);                         // throws an error if not set (even if it's 0)
 //        err |= pwm_start();
 //    }
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "pwm config err %d ", err);
-        return -1;
-    }
+//    if (err != ESP_OK) {
+//        ESP_LOGE(TAG, "pwm config err %d ", err);
+//        return err;
+//    }
 
     // configure task to manage remote commands
     if (num_remote_lights > 0) {
@@ -1107,22 +1148,18 @@ int8_t configure_peripherals() {
 //    ESP_LOGI(TAG, "num lights %d, PWM lights %d, num_remote_lights %d", num_lights, i_pwm, num_remote_lights);
     ESP_LOGI(TAG, "num lights %d, PWM lights XXXXXX, num_remote_lights %d", num_lights, num_remote_lights);
  
-    return num_lights - num_remote_lights;      // if > 0 then homekit server will start
+    return ESP_OK;
 }
+
 
 void app_main(void)
 {
     esp_err_t err;
 
-    esp_log_level_set("*", ESP_LOG_DEBUG);      
-    esp_log_level_set("httpd", ESP_LOG_INFO); 
-    esp_log_level_set("httpd_uri", ESP_LOG_INFO);    
-    esp_log_level_set("httpd_txrx", ESP_LOG_INFO);     
-//    esp_log_level_set("httpd_sess", ESP_LOG_INFO);
-    esp_log_level_set("httpd_parse", ESP_LOG_INFO);  
-    esp_log_level_set("vfs", ESP_LOG_INFO);     
-    esp_log_level_set("esp_timer", ESP_LOG_INFO);     
- 
+//    esp_log_level_set("*", ESP_LOG_DEBUG);         
+//    esp_log_level_set("esp_netif_lwip", ESP_LOG_DEBUG);    
+    esp_log_level_set("wifi", ESP_LOG_WARN);    
+
     // Initialize NVS. 
     err = nvs_flash_init();
     if (err == ESP_ERR_NVS_NO_FREE_PAGES) {     // can happen if truncated/partition size changed
@@ -1139,25 +1176,48 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_event_handler_instance_register(HOMEKIT_EVENT, ESP_EVENT_ANY_ID, main_event_handler, NULL, NULL));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(BUTTON_EVENT, ESP_EVENT_ANY_ID, main_event_handler, NULL, NULL));
 
-    int8_t num_hardware_lights = configure_peripherals();
+    esp_app_desc_t app_desc;
+    const esp_partition_t *ota0_partition;
+    ota0_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_0, NULL);
+    esp_ota_get_partition_description(ota0_partition, &app_desc);
+    ESP_LOGI(TAG, "ota0 version: %s", app_desc.version);
+
+    const esp_partition_t *ota1_partition;
+    ota1_partition = esp_partition_find_first(ESP_PARTITION_TYPE_APP, ESP_PARTITION_SUBTYPE_APP_OTA_1, NULL);
+    err = esp_ota_get_partition_description(ota1_partition, &app_desc);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "ota1 version: %s", app_desc.version);
+    } else if (err == ESP_ERR_NOT_FOUND) {
+        ESP_LOGW(TAG, "ota1 not found. no ota is likely to have occurred before");
+    } else {
+        ESP_LOGE(TAG, "ota1 error");
+    }
+
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08x)",
+             running->type, running->subtype, running->address);
+
+
+    err = configure_peripherals();
 
     my_wifi_init();
 
         
-
+    // global flag indicating an error has occured 
     status_error = false;
 
-    if (num_hardware_lights == 0) {
-        // no homekit accessory to be created. all lights are remote
-    }
-    else if (num_hardware_lights > 0) {
+    // if there were no errors during device config, start homekit
+    if (err == ESP_OK) {
         init_accessory();
-        homekit_server_init(&config);
     }
     else {
-        // indicate error
         status_error = true;
     }
 
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // I have had my program work on a DevKit module, but fail on a TinyPico module.
+    //   App rollback ensures everything starts OK and sets the image valid. Otherwise, on the next reboot, it will rollback.
+    esp_ota_mark_app_valid_cancel_rollback();
 
 }

@@ -55,6 +55,10 @@ elseif(${IDF_TARGET} STREQUAL "esp32")
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} \
     -DIDF_TARGET_ESP32"
   )
+elseif(${IDF_TARGET} STREQUAL "esp32c3")
+  set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} \
+    -DIDF_TARGET_ESP32"
+  )
 else()
   message(FATAL_ERROR "user_settings.h only supports esp8266 and esp32 targets")
 endif()

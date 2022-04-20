@@ -8,8 +8,13 @@
 #include "button.h"
 
 #define MAX_TOGGLE_VALUE 4
-#define MIN(a, b) (((b) < (a)) ? (b) : (a))
-#define MAX(a, b) (((a) < (b)) ? (b) : (a))
+
+#ifndef MIN
+    #define MIN(a, b) (((b) < (a)) ? (b) : (a))
+#endif
+#ifndef MAX
+    #define MAX(a, b) (((a) < (b)) ? (b) : (a))
+#endif
 
 typedef struct _button {
     uint8_t gpio_num;
@@ -182,12 +187,6 @@ int button_create(const uint8_t gpio_num,
 
     gpio_config_t io_conf = {0};
     io_conf.mode = GPIO_MODE_INPUT;
-
-
-    io_conf.pull_up_en = pdTRUE;
-
-
-
     io_conf.pin_bit_mask = (1ULL<<button->gpio_num);
     if (gpio_config(&io_conf) != ESP_OK) {
         button_free(button);
