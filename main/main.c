@@ -52,6 +52,7 @@ static const char *TAG = "main";
 static led_status_t led_status;
 static bool status_error = false;
 
+// you must set FreeRTOS tick rate to 1000, otherwise minimum LED tick value is 10. it will crash if you do not.
 static led_status_pattern_t normal_mode = LED_STATUS_PATTERN({1, -20000});
 static led_status_pattern_t led_status_error = LED_STATUS_PATTERN({100, -100});
 static led_status_pattern_t ap_mode = LED_STATUS_PATTERN({1000, -1000});
