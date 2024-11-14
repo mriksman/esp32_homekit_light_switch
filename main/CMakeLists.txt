@@ -5,5 +5,6 @@ set(CMAKE_CXX_STANDARD 17)
 idf_component_register(
     SRCS httpd.c wifi.c main.c 
     INCLUDE_DIRS .
-    EMBED_TXTFILES ${project_dir}/web/wifi.html.gz
+    EMBED_TXTFILES 
+        ${project_dir}/web/wifi.html.gz
 )

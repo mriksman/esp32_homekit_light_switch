@@ -1,0 +1,75 @@
+stages:
+  - build
+  - deploy
+
+variables:
+  BATCH_BUILD: "1"
+  V: "0"
+  MAKEFLAGS: "-j5 --no-keep-going"
+  GIT_SUBMODULE_STRATEGY: recursive
+
+# before each job, we need to check if this job is filtered by bot stage/job filter
+.apply_bot_filter: &apply_bot_filter
+  python $APPLY_BOT_FILTER_SCRIPT || exit 0
+
+.setup_env:
+  before_script: &setup_env
+    # apply bot filter in before script
+    - *apply_bot_filter
+    # add gitlab ssh key
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -n $GITLAB_KEY > ~/.ssh/id_rsa_base64
+    - base64 --decode --ignore-garbage ~/.ssh/id_rsa_base64 > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - echo -e "Host gitlab.espressif.cn\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
+    - git --version
+    - git submodule update --init --recursive
+
+.build_idf_template:
+  stage: build
+  image: espressif/idf:latest
+  tags:
+    - build
+  variables:
+    PEDANTIC_FLAGS: "-Werror -Werror=unused-variable -Werror=unused-but-set-variable -Werror=unused-function"
+    EXTRA_CFLAGS: "${PEDANTIC_FLAGS}"
+    EXTRA_CXXFLAGS: "${PEDANTIC_FLAGS}"
+  script:
+    - cd $CI_PROJECT_DIR/tools/ci
+    - ./build_examples.sh || exit 1
+
+build_idf_master:
+  extends: .build_idf_template
+  image: espressif/idf:latest
+
+build_idf_v4.4:
+  extends: .build_idf_template
+  image: espressif/idf:release-v4.4
+
+push_master_to_github:
+  stage: deploy
+  image: espressif/idf:latest
+  tags:
+    - deploy
+  only:
+    - master
+  when: on_success
+  dependencies: []
+  variables:
+    GITHUB_PUSH_REFS: refs/remotes/origin/release refs/remotes/origin/master
+  before_script: *setup_env
+  script:
+    - mkdir -p ~/.ssh
+    - chmod 700 ~/.ssh
+    - echo -n $GH_PUSH_KEY > ~/.ssh/id_rsa_base64
+    - base64 --decode --ignore-garbage ~/.ssh/id_rsa_base64 > ~/.ssh/id_rsa
+    - chmod 600 ~/.ssh/id_rsa
+    - echo -e "Host github.com\n\tStrictHostKeyChecking no\n" >> ~/.ssh/config
+    - git remote remove github &>/dev/null || true
+    - git remote add github git@github.com:espressif/esp-wolfssl.git
+    # What the next line of script does: goes through the list of refs for all branches we push to github,
+    # generates a snippet of shell which is evaluated. The snippet checks CI_COMMIT_SHA against the SHA
+    # (aka objectname) at tip of each branch, and if any SHAs match then it checks out the local branch
+    # and then pushes that ref to a corresponding github branch
+    - eval $(git for-each-ref --shell bash --format 'if [ $CI_COMMIT_SHA == %(objectname) ]; then git checkout -B %(refname:strip=3); git push --follow-tags github %(refname:strip=3); fi;' $GITHUB_PUSH_REFS)

@@ -7,8 +7,9 @@
 
 #include "esp_event.h"                          // For esp_event_base_t
 #include "esp_err.h"
+#include "esp_mac.h"
+#include "esp_netif.h"
 
-#include "esp_wifi_types.h"
 #include "esp_wifi.h"
 //#include "esp_timer.h"
 
@@ -170,16 +171,19 @@ void my_wifi_init() {
     esp_netif_create_default_wifi_ap();
 
     // Changes the IP address used for the soft AP. 
-    esp_netif_t* netif = NULL;
-    netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+    // Get the handle for the Soft AP network interface
+    esp_netif_t* netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
+
+    // Define the IP address, gateway, and netmask
     esp_netif_ip_info_t ip_info;
-    IP4_ADDR(&ip_info.ip, 192,168,8,1);
-	IP4_ADDR(&ip_info.gw, 192,168,8,1);
-	IP4_ADDR(&ip_info.netmask, 255,255,252,0);
-	
-    esp_netif_dhcps_stop(netif);
-	esp_netif_set_ip_info(netif, &ip_info);
-	esp_netif_dhcps_start(netif);
+    ip_info.ip.addr = esp_ip4addr_aton("192.168.8.1");   // Set IP address
+    ip_info.gw.addr = esp_ip4addr_aton("192.168.8.1");   // Set Gateway
+    ip_info.netmask.addr = esp_ip4addr_aton("255.255.252.0");  // Set Netmask
+    
+    // Stop the DHCP server, set new IP info, and start the DHCP server
+    esp_netif_dhcps_stop(netif);                        // Stop DHCP server
+    esp_netif_set_ip_info(netif, &ip_info);             // Set new IP info
+    esp_netif_dhcps_start(netif);                       // Start DHCP server
 
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_AP_STACONNECTED, wifi_event_handler, NULL, &wifi_ap_staconnected));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_AP_STADISCONNECTED, wifi_event_handler, NULL, &wifi_ap_stadisconnected));

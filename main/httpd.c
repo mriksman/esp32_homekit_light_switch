@@ -2,6 +2,7 @@
 #include "freertos/task.h"
 #include <freertos/timers.h>
 #include <sys/param.h>                          // MIN MAX
+#include <inttypes.h>                           // Include this for PRIu8, PRIu16, PRIu32
 
 #include "esp_http_server.h"
 #include "esp_wifi.h"
@@ -380,11 +381,11 @@ esp_err_t otaupdate_handler(httpd_req_t *req)
     const esp_partition_t *running = esp_ota_get_running_partition();
 
     if (configured != running) {
-        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%08x, but running from offset 0x%08x",
+        ESP_LOGW(TAG, "Configured OTA boot partition at offset 0x%" PRIx32 ", but running from offset 0x%" PRIx32,
                  configured->address, running->address);
         ESP_LOGW(TAG, "(This can happen if either the OTA boot data or preferred boot image become corrupted somehow.)");
     }
-    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08x)",
+    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%" PRIx32 ")",
              running->type, running->subtype, running->address);
 
 
@@ -403,7 +404,7 @@ esp_err_t otaupdate_handler(httpd_req_t *req)
     const esp_partition_t *update_partition = NULL;
 
     update_partition = esp_ota_get_next_update_partition(NULL);
-    ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%08x",
+    ESP_LOGI(TAG, "Writing to partition subtype %d at offset 0x%" PRIx32,
              update_partition->subtype, update_partition->address);
 
     if (update_partition == NULL) {
@@ -412,7 +413,7 @@ esp_err_t otaupdate_handler(httpd_req_t *req)
 
     // File cannot be larger than partition size
     if (update_partition != NULL && req->content_len > update_partition->size) {
-        ESP_LOGE(TAG, "Content-Length of %d larger than partition size of %d", req->content_len, update_partition->size); 
+        ESP_LOGE(TAG, "Content-Length of %d larger than partition size of %" PRIu32, req->content_len, update_partition->size); 
         err = ESP_ERR_INVALID_SIZE;
     }
 
@@ -440,7 +441,7 @@ esp_err_t otaupdate_handler(httpd_req_t *req)
                     ESP_LOGE(TAG, "Error esp_ota_begin()"); 
                 } 
                 else {
-                    ESP_LOGI(TAG, "Writing to partition '%s' at offset 0x%x",
+                    ESP_LOGI(TAG, "Writing to partition '%s' at offset 0x%" PRIx32,
                         update_partition->label, update_partition->address);
                 }
             }
@@ -488,7 +489,7 @@ esp_err_t otaupdate_handler(httpd_req_t *req)
     err = esp_ota_set_boot_partition(update_partition);
 
     const esp_partition_t *boot_partition = esp_ota_get_boot_partition();
-    ESP_LOGW(TAG, "Next boot partition '%s' at offset 0x%x",
+    ESP_LOGW(TAG, "Next boot partition '%s' at offset 0x%" PRIx32,
         boot_partition->label, boot_partition->address);
 
     if (err == ESP_OK) {

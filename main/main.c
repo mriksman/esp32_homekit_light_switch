@@ -2,13 +2,21 @@
     Version History
     ---------------
     9.0.4   20-Apr-2023     tidied up http cpde - still had old boot partition code used on esp8266
+    9.0.5   25-May-2022     set characteristics[] size to 4 (it was incorrectly set to 3 for dimmers and 2 for switches)
+    9.0.6   26-May-2022     added custom characteristics to track restarts
 */
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <freertos/timers.h>
 
+//added as a dependency
+#include "mdns.h"
+
 #include "driver/gpio.h"
+#include "esp_wifi.h"
+#include "esp_netif.h"                          // Must be included before esp_wifi_default.h
+
 #include <sys/param.h>                          // min max functions
 #include <math.h>                               // pow function
 #include <string.h>
@@ -21,13 +29,10 @@
 #include "esp_event.h"
 #include "esp_ota_ops.h"
 #include "esp_image_format.h"
+#include "esp_mac.h"
 
-#include "esp_wifi.h"
 #include "wifi.h"
-#include "esp_netif.h"                          // Must be included before esp_wifi_default.h
 #include "esp_wifi_default.h"                   // For esp_netif_create_default_wifi_sta
-#include "mdns.h"
-
 #include "esp_http_client.h"
 #include "cJSON.h"
 #define MAX_HTTP_OUTPUT_BUFFER 2048
@@ -141,6 +146,9 @@ esp_err_t _http_event_handler(esp_http_client_event_t *evt)
             break;
         case HTTP_EVENT_DISCONNECTED:
             ESP_LOGI(TAG, "HTTP_EVENT_DISCONNECTED");
+            break;
+        default:
+            // handle unexpected event type
             break;
     }
     return ESP_OK;
@@ -800,6 +808,71 @@ void init_accessory() {
     char *name_value = malloc(name_len + 1);
     snprintf( name_value, name_len + 1, "esp-%02x%02x%02x", macaddr[3], macaddr[4], macaddr[5] ); 
 
+
+    // retrieve (and increment) number of restarts. to be stored in custom characteristic
+    uint8_t num_restarts = 0;
+
+    nvs_handle lights_config_handle;
+
+    esp_err_t err = nvs_open("lights", NVS_READWRITE, &lights_config_handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "nvs_open err %d ", err);
+    } else {
+        // Retrieve stored number of restarts
+        err = nvs_get_u8(lights_config_handle, "num_restarts", &num_restarts); 
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "error nvs_get_u8 num_restarts err %d", err);
+        } 
+        num_restarts++;
+        err = nvs_set_u8(lights_config_handle, "num_restarts", num_restarts);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "error nvs_set_u8 num_restarts err %d", err);
+        } 
+    }
+    nvs_close(lights_config_handle);
+
+    // retrieve restart reason
+    esp_reset_reason_t reset_reason = esp_reset_reason();
+
+    char *reset_reason_str = malloc(20);
+
+    switch (reset_reason)
+    {
+    case ESP_RST_POWERON:
+        snprintf(reset_reason_str, 20, "Power-on");
+        break;
+    case ESP_RST_EXT:
+        snprintf(reset_reason_str, 20, "External pin");
+        break;
+    case ESP_RST_SW:
+        snprintf(reset_reason_str, 20, "Software reset");
+        break;
+    case ESP_RST_PANIC:
+        snprintf(reset_reason_str, 20, "Exception/Panic");
+        break;
+    case ESP_RST_INT_WDT:
+        snprintf(reset_reason_str, 20, "Interrup WDT");
+        break;
+    case ESP_RST_TASK_WDT:
+        snprintf(reset_reason_str, 20, "Task WDT");
+        break;
+    case ESP_RST_WDT:
+        snprintf(reset_reason_str, 20, "Other WDT");
+        break;
+    case ESP_RST_DEEPSLEEP:
+        snprintf(reset_reason_str, 20, "Exit Deepsleep");
+        break;
+    case ESP_RST_BROWNOUT:
+        snprintf(reset_reason_str, 20, "Brownout");
+        break;
+    case ESP_RST_SDIO:
+        snprintf(reset_reason_str, 20, "SDIO");
+        break;                                                                                                                                    
+    default:
+        snprintf(reset_reason_str, 20, "Unknown");
+        break;
+    }
+    
     while (light) {
         // if not a remote and not hidden (homekit enable)
         if (!light->is_remote && !light->is_hidden) {
@@ -831,8 +904,8 @@ void init_accessory() {
             int light_name_len = snprintf(NULL, 0, "Light %d", hk_light_idx);
             char *light_name_value = malloc(light_name_len + 1);
             snprintf(light_name_value, light_name_len + 1, "Light %d", hk_light_idx);
-
-            homekit_characteristic_t* characteristics[light->is_dimmer ? 3 : 2]; // NAME, ON and if a dimmer BRIGHTNESS
+           
+            homekit_characteristic_t* characteristics[6]; // NAME, ON and if a dimmer BRIGHTNESS (and also NULL), and have added 2 Custom Characteristics
             homekit_characteristic_t** c = characteristics;
 
             *(c++) = NEW_HOMEKIT_CHARACTERISTIC(NAME, light_name_value);
@@ -854,6 +927,27 @@ void init_accessory() {
                         ),
                     );
             }
+
+            *(c++) = NEW_HOMEKIT_CHARACTERISTIC(
+                    CUSTOM,
+                    .type = "02B77072-DA5D-493C-829D-F6C5DCFE5C28",
+                    .description = "Restart Reason",
+                    .format = homekit_format_string,
+                    .permissions = homekit_permissions_paired_read |
+                                homekit_permissions_notify,
+                    .value = HOMEKIT_STRING_(reset_reason_str),
+                );
+
+            *(c++) = NEW_HOMEKIT_CHARACTERISTIC(
+                        CUSTOM,
+                        .type = "02B77073-DA5D-493C-829D-F6C5DCFE5C28",
+                        .description = "Num Restarts",
+                        .format = homekit_format_uint8,
+                        .permissions = homekit_permissions_paired_read |
+                                    homekit_permissions_notify,
+                        .value = HOMEKIT_UINT8_(num_restarts),
+                    );
+
             *(c++) = NULL;
  
             // if dimmer, use LIGHTBULB Service to use BRIGHTNESS Characteristic
@@ -1195,7 +1289,7 @@ void app_main(void)
     }
 
     const esp_partition_t *running = esp_ota_get_running_partition();
-    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%08x)",
+    ESP_LOGI(TAG, "Running partition type %d subtype %d (offset 0x%" PRIx32 ")",
              running->type, running->subtype, running->address);
 
 
@@ -1220,5 +1314,7 @@ void app_main(void)
     // I have had my program work on a DevKit module, but fail on a TinyPico module.
     //   App rollback ensures everything starts OK and sets the image valid. Otherwise, on the next reboot, it will rollback.
     esp_ota_mark_app_valid_cancel_rollback();
+
+
 
 }
