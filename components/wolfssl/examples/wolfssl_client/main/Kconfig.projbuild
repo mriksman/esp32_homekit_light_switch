@@ -1,9 +1,0 @@
-menu "Example Configuration"
-
-    config EXAMPLE_SERVER_CERT_VERIFY
-        bool      "Enable Server Certificate Verification"
-        default   y
-        help
-	          Enabling this option validates the server certificate while establishing a TLS connection.
-
-endmenu # Example Configuration
