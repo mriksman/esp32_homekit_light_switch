@@ -751,7 +751,7 @@ void light_on_set(homekit_characteristic_t *ch, homekit_value_t value) {
 
     light_service_t *light = (light_service_t*) ch->context;
 
-/*
+/* DEBUG
             homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
             ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
 
@@ -766,9 +766,10 @@ void light_on_set(homekit_characteristic_t *ch, homekit_value_t value) {
     // use the global struct variable instead
     light->on = value.bool_value;
 
+/* DEBUG
                     ESP_LOGE(TAG, "SET New Value %d", ch->value.bool_value);
                     ESP_LOGE(TAG, "SET New Value in light_service_t %d", light->on);
-
+*/
     // change/light relay value
     gpio_set_level(light->light_gpio, light->invert_light_gpio ? !light->on : light->on); 
 
