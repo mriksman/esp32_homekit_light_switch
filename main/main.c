@@ -1,9 +1,10 @@
 /* 
     Version History
     ---------------
-    9.0.4   20-Apr-2023     tidied up http cpde - still had old boot partition code used on esp8266
-    9.0.5   25-May-2022     set characteristics[] size to 4 (it was incorrectly set to 3 for dimmers and 2 for switches)
-    9.0.6   26-May-2022     added custom characteristics to track restarts
+     9.0.4   20-Apr-2023     tidied up http cpde - still had old boot partition code used on esp8266
+     9.0.5   25-May-2022     set characteristics[] size to 4 (it was incorrectly set to 3 for dimmers and 2 for switches)
+     9.0.6   26-May-2022     added custom characteristics to track restarts
+    10.1.0   07-Dec-2024     updated to esp-idf 5 and new esp-homekit and esp-wolfssl
 */
 
 #include "freertos/FreeRTOS.h"
@@ -232,10 +233,10 @@ static void remote_hk_task(void * arg)
                 cJSON *payload_json = cJSON_GetObjectItem(hk_command.light->nvs_command, "payload");
 
     char *out = cJSON_PrintUnformatted(hk_command.light->nvs_command);
-    ESP_LOGW("NVS PAYLOAD", "key: \"payload\" value: %s", out);
+    ESP_LOGI("NVS PAYLOAD", "key: \"payload\" value: %s", out);
     free(out);
 
-    ESP_LOGW(TAG, "mdns query host %s", host_json->valuestring);
+    ESP_LOGI(TAG, "mdns query host %s", host_json->valuestring);
 
                 // use 'host' and resolve IP address
                 //    (bug esp-idf #5521) workaround: use mdns library to resolve hostname
@@ -253,7 +254,7 @@ static void remote_hk_task(void * arg)
                 sprintf(host_ip, IPSTR, IP2STR(&mdns_addr));
                 // end workaround **************************** //
 
-    ESP_LOGW(TAG, "mdns address resolve %s", host_ip);
+    ESP_LOGI(TAG, "mdns address resolve %s", host_ip);
 
                 // create aid.iid csv to send to remote hk device
                 char aid_iid[20] = {0};
@@ -278,7 +279,7 @@ static void remote_hk_task(void * arg)
                 // remove last ','
                 aid_iid[strlen(aid_iid)-1] = '\0';
 
-    ESP_LOGW(TAG, "aid_iid: %s", aid_iid);
+    ESP_LOGI(TAG, "aid_iid: %s", aid_iid);
 
                 strcpy(url_string, "http://");
                 strcat(url_string, host_ip);
@@ -320,7 +321,7 @@ static void remote_hk_task(void * arg)
                     }
                 }
 
-    ESP_LOGW("RESPONSE", "%s", local_response_buffer);
+    ESP_LOGI("RESPONSE", "%s", local_response_buffer);
 
                 // **** parse the response returned from the hk client device ****//
                 cJSON *root_resp = cJSON_Parse(local_response_buffer);
@@ -414,7 +415,7 @@ static void remote_hk_task(void * arg)
             char *out = cJSON_PrintUnformatted(root_cmd);
             cJSON_Delete(root_cmd);
 
-    ESP_LOGW("COMMAND", "key: \"characteristics\" value: %s", out);
+    ESP_LOGI("COMMAND", "key: \"characteristics\" value: %s", out);
             
             local_response_buffer[0] = '\0';
 
@@ -430,7 +431,7 @@ static void remote_hk_task(void * arg)
             if (err == ESP_OK) {
                 ESP_LOGI(TAG, "HTTP POST Status = %d", esp_http_client_get_status_code(hk_command.light->client));
 
-    ESP_LOGW("HTTP POST FINISHED", "%s", local_response_buffer);
+    ESP_LOGI("HTTP POST FINISHED", "%s", local_response_buffer);
 
             } else {
                 ESP_LOGE(TAG, "HTTP POST request failed: %s", esp_err_to_name(err));
@@ -615,28 +616,12 @@ static void main_event_handler(void* arg, esp_event_base_t event_base,  int32_t 
                     // change/light relay value
                     gpio_set_level(light->light_gpio, light->invert_light_gpio ? !light->on : light->on); 
 
-
-
                     // if not hidden (homekit enabled)
                     if (!light->is_hidden) {
-
-
-/*
-            homekit_service_t *acc_service = homekit_service_by_type(light->service->accessory, HOMEKIT_SERVICE_ACCESSORY_INFORMATION);
-            homekit_characteristic_t *acc_service_manufacture  = homekit_service_characteristic_by_type(acc_service, HOMEKIT_CHARACTERISTIC_MANUFACTURER);
-            ESP_LOGE(TAG, "Button Press ***** Manufacturer NAME char %s", acc_service_manufacture->value.string_value ); 
-
-            homekit_characteristic_t *char_name  = homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_NAME);
-            ESP_LOGE(TAG, "Button Press ***** Button NAME char %s", char_name->value.string_value ); 
-*/
-
-
                         // Get the service and characteristics
                         homekit_characteristic_t *on_c =  homekit_service_characteristic_by_type(light->service, HOMEKIT_CHARACTERISTIC_ON);   
                         // Unlike .setter_ex function, this is absolutely required to update clients instantly
                         homekit_characteristic_notify(on_c, HOMEKIT_BOOL(light->on));
-
-
                     }
 
                 }
