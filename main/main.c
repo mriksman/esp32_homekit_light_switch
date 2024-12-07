@@ -707,7 +707,7 @@ void lightbulb_on_callback(homekit_characteristic_t *_ch, homekit_value_t value,
 
     if (light->is_dimmer) {
         homekit_characteristic_t *brightness_c = homekit_service_characteristic_by_type(
-                    _ch->service, HOMEKIT_CHARACTERISTIC_BRIGHTNESS );
+                    light->service, HOMEKIT_CHARACTERISTIC_BRIGHTNESS );
 
 
 //        double gamma = pow(((brightness_c->value.int_value+25.0)/125.0),2.2)*100.0;
